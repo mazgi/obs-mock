@@ -11,5 +11,6 @@ services:
       - .:/workspace
     ports:
       - "4455:4455"
+    command: cargo run
     tty: true
     stdin_open: true
