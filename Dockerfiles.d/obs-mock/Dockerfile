@@ -12,8 +12,7 @@ ARG GID=1000
 RUN groupadd --force --gid ${GID} developer \
   && useradd --uid ${UID} --gid ${GID} --create-home --non-unique developer
 
-RUN cargo install cargo-watch --locked \
-  && cargo install cargo-dist --locked
+RUN cargo install cargo-watch --locked
 
 USER developer
 
