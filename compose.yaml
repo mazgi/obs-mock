@@ -1,0 +1,15 @@
+services:
+  obs-mock:
+    build:
+      context: .
+      dockerfile: Dockerfiles.d/obs-mock/Dockerfile
+      args:
+        GID: "${GID:-1000}"
+        UID: "${UID:-1000}"
+    working_dir: /workspace/obs-mock
+    volumes:
+      - .:/workspace
+    ports:
+      - "4455:4455"
+    tty: true
+    stdin_open: true
