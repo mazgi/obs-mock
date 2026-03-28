@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::server::{
     Request as WsRequest, Response as WsResponse,
 };
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::auth::AuthConfig;
@@ -59,7 +60,22 @@ async fn handle_connection(
     stream: TcpStream,
     password: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ws_stream = tokio_tungstenite::accept_hdr_async(stream, |_req: &WsRequest, response: WsResponse| {
+    let ws_stream = tokio_tungstenite::accept_hdr_async(stream, |req: &WsRequest, mut response: WsResponse| {
+        // Negotiate the obswebsocket subprotocol as required by OBS WebSocket v5.x clients
+        if let Some(protocols) = req.headers().get("sec-websocket-protocol") {
+            let protocols_str = protocols.to_str().unwrap_or("");
+            if protocols_str.contains("obswebsocket.json") {
+                response.headers_mut().insert(
+                    "sec-websocket-protocol",
+                    HeaderValue::from_static("obswebsocket.json"),
+                );
+            } else if protocols_str.contains("obswebsocket.msgpack") {
+                response.headers_mut().insert(
+                    "sec-websocket-protocol",
+                    HeaderValue::from_static("obswebsocket.msgpack"),
+                );
+            }
+        }
         Ok(response)
     })
     .await?;
