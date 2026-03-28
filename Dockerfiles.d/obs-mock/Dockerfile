@@ -12,6 +12,8 @@ ARG GID=1000
 RUN groupadd --force --gid ${GID} developer \
   && useradd --uid ${UID} --gid ${GID} --create-home --non-unique developer
 
+RUN cargo install cargo-watch
+
 USER developer
 
 WORKDIR /workspace
