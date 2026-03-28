@@ -9,8 +9,6 @@ services:
     working_dir: /workspace/obs-mock
     volumes:
       - .:/workspace
-    ports:
-      - "4455:4455"
     command: cargo watch -x run
     tty: true
     stdin_open: true
