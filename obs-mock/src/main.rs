@@ -4,7 +4,7 @@ mod protocol;
 mod state;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info, warn};
@@ -23,6 +23,29 @@ use crate::state::ObsState;
 
 const DEFAULT_PORT: u16 = 4455;
 
+#[derive(Clone, Copy, PartialEq)]
+enum WireFormat {
+    Json,
+    MsgPack,
+}
+
+fn encode_msg(format: WireFormat, value: &impl serde::Serialize) -> Result<Message, Box<dyn std::error::Error + Send + Sync>> {
+    match format {
+        WireFormat::Json => Ok(Message::Text(serde_json::to_string(value)?.into())),
+        WireFormat::MsgPack => Ok(Message::Binary(rmp_serde::to_vec_named(value)?.into())),
+    }
+}
+
+fn decode_msg(format: WireFormat, msg: &Message) -> Result<protocol::Message, Box<dyn std::error::Error + Send + Sync>> {
+    match (format, msg) {
+        (WireFormat::Json, Message::Text(text)) => Ok(serde_json::from_str(text)?),
+        (WireFormat::MsgPack, Message::Binary(data)) => Ok(rmp_serde::from_slice(data)?),
+        // Also accept JSON text even in msgpack mode (some clients mix)
+        (WireFormat::MsgPack, Message::Text(text)) => Ok(serde_json::from_str(text)?),
+        _ => Err("unexpected message type".into()),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -37,7 +60,7 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
 
-    info!("OBS WebSocket Mock Server listening on ws://{}", addr);
+    info!("OBS WebSocket Mock Server v{} listening on ws://{}", env!("CARGO_PKG_VERSION"), addr);
     if password.is_some() {
         info!("Authentication is enabled");
     } else {
@@ -60,25 +83,37 @@ async fn handle_connection(
     stream: TcpStream,
     password: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ws_stream = tokio_tungstenite::accept_hdr_async(stream, |req: &WsRequest, mut response: WsResponse| {
-        // Negotiate the obswebsocket subprotocol as required by OBS WebSocket v5.x clients
+    let format = Arc::new(StdMutex::new(WireFormat::Json));
+    let format_clone = format.clone();
+
+    let ws_stream = tokio_tungstenite::accept_hdr_async(stream, move |req: &WsRequest, mut response: WsResponse| {
         if let Some(protocols) = req.headers().get("sec-websocket-protocol") {
             let protocols_str = protocols.to_str().unwrap_or("");
+            info!("Client requested subprotocols: {}", protocols_str);
             if protocols_str.contains("obswebsocket.json") {
                 response.headers_mut().insert(
                     "sec-websocket-protocol",
                     HeaderValue::from_static("obswebsocket.json"),
                 );
             } else if protocols_str.contains("obswebsocket.msgpack") {
+                *format_clone.lock().unwrap() = WireFormat::MsgPack;
                 response.headers_mut().insert(
                     "sec-websocket-protocol",
                     HeaderValue::from_static("obswebsocket.msgpack"),
                 );
             }
+        } else {
+            response.headers_mut().insert(
+                "sec-websocket-protocol",
+                HeaderValue::from_static("obswebsocket.json"),
+            );
         }
         Ok(response)
     })
     .await?;
+
+    let wire = *format.lock().unwrap();
+    info!("Using {} format", if wire == WireFormat::MsgPack { "msgpack" } else { "json" });
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -99,21 +134,31 @@ async fn handle_connection(
     };
 
     let hello_msg = protocol::Message::new(OP_HELLO, &hello);
-    write
-        .send(Message::Text(serde_json::to_string(&hello_msg)?.into()))
-        .await?;
+    write.send(encode_msg(wire, &hello_msg)?).await?;
     info!("Sent Hello");
 
     // Wait for Identify (OpCode 1)
     let identify = loop {
         match read.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let msg: protocol::Message = serde_json::from_str(&text)?;
-                if msg.op == OP_IDENTIFY {
-                    let identify: Identify = serde_json::from_value(msg.d)?;
+            Some(Ok(ref msg @ (Message::Text(_) | Message::Binary(_)))) => {
+                let parsed = match decode_msg(wire, msg) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!("Failed to parse message: {}", e);
+                        continue;
+                    }
+                };
+                if parsed.op == OP_IDENTIFY {
+                    let identify: Identify = match serde_json::from_value(parsed.d) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            warn!("Failed to parse Identify data: {}", e);
+                            continue;
+                        }
+                    };
                     break identify;
                 }
-                warn!("Expected Identify, got op: {}", msg.op);
+                warn!("Expected Identify, got op: {}", parsed.op);
             }
             Some(Ok(Message::Close(_))) | None => return Ok(()),
             Some(Ok(_)) => continue,
@@ -136,11 +181,7 @@ async fn handle_connection(
         negotiated_rpc_version: identify.rpc_version.min(RPC_VERSION),
     };
     let identified_msg = protocol::Message::new(OP_IDENTIFIED, &identified);
-    write
-        .send(Message::Text(
-            serde_json::to_string(&identified_msg)?.into(),
-        ))
-        .await?;
+    write.send(encode_msg(wire, &identified_msg)?).await?;
     info!("Client identified (rpcVersion: {})", identify.rpc_version);
 
     // Process requests
@@ -148,8 +189,8 @@ async fn handle_connection(
 
     while let Some(msg) = read.next().await {
         match msg {
-            Ok(Message::Text(text)) => {
-                let parsed: protocol::Message = match serde_json::from_str(&text) {
+            Ok(ref msg @ (Message::Text(_) | Message::Binary(_))) => {
+                let parsed = match decode_msg(wire, msg) {
                     Ok(m) => m,
                     Err(e) => {
                         warn!("Failed to parse message: {}", e);
@@ -173,9 +214,7 @@ async fn handle_connection(
                         };
 
                         let response_msg = protocol::Message::new(OP_REQUEST_RESPONSE, &response);
-                        write
-                            .send(Message::Text(serde_json::to_string(&response_msg)?.into()))
-                            .await?;
+                        write.send(encode_msg(wire, &response_msg)?).await?;
                     }
 
                     OP_REQUEST_BATCH => {
@@ -212,9 +251,7 @@ async fn handle_connection(
                         };
                         let response_msg =
                             protocol::Message::new(OP_REQUEST_BATCH_RESPONSE, &batch_response);
-                        write
-                            .send(Message::Text(serde_json::to_string(&response_msg)?.into()))
-                            .await?;
+                        write.send(encode_msg(wire, &response_msg)?).await?;
                     }
 
                     OP_REIDENTIFY => {
@@ -223,9 +260,7 @@ async fn handle_connection(
                             negotiated_rpc_version: RPC_VERSION,
                         };
                         let msg = protocol::Message::new(OP_IDENTIFIED, &identified);
-                        write
-                            .send(Message::Text(serde_json::to_string(&msg)?.into()))
-                            .await?;
+                        write.send(encode_msg(wire, &msg)?).await?;
                     }
 
                     _ => {

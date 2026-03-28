@@ -198,6 +198,7 @@ pub fn handle_request(
         "SetCurrentProgramScene" => {
             if let Some(idx) = state.resolve_scene(data) {
                 state.current_program_scene = idx;
+                log::info!("Program scene changed to: {}", state.scenes[idx].name);
                 success_empty(request_type, request_id)
             } else {
                 not_found(request_type, request_id, "Scene not found")
@@ -217,6 +218,7 @@ pub fn handle_request(
         "SetCurrentPreviewScene" => {
             if let Some(idx) = state.resolve_scene(data) {
                 state.current_preview_scene = idx;
+                log::info!("Preview scene changed to: {}", state.scenes[idx].name);
                 success_empty(request_type, request_id)
             } else {
                 not_found(request_type, request_id, "Scene not found")
