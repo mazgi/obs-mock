@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::protocol::{RequestResponse, REQUEST_STATUS_UNKNOWN};
-use crate::state::{Input, ObsState, Scene};
+use crate::state::{Input, ObsState, Scene, SceneItem, SceneItemTransform};
 
 pub fn handle_request(
     state: &mut ObsState,
@@ -233,6 +233,7 @@ pub fn handle_request(
             state.scenes.push(Scene {
                 name,
                 uuid: uuid.clone(),
+                items: vec![],
             });
             success(request_type, request_id, json!({ "sceneUuid": uuid }))
         }
@@ -671,53 +672,303 @@ pub fn handle_request(
         "GetOutputSettings" => success(request_type, request_id, json!({ "outputSettings": {} })),
 
         // Scene Items
-        "GetSceneItemList" | "GetGroupSceneItemList" => success(request_type, request_id, json!({
-            "sceneItems": []
-        })),
-
-        "GetSceneItemId" => success(request_type, request_id, json!({ "sceneItemId": 1 })),
-
-        "GetSceneItemSource" => success(request_type, request_id, json!({
-            "sourceName": "Mock Source",
-            "sourceUuid": Uuid::new_v4().to_string()
-        })),
-
-        "CreateSceneItem" => success(request_type, request_id, json!({ "sceneItemId": 1 })),
-
-        "RemoveSceneItem" | "SetSceneItemTransform" | "SetSceneItemEnabled"
-        | "SetSceneItemLocked" | "SetSceneItemIndex" | "SetSceneItemBlendMode" => {
-            success_empty(request_type, request_id)
+        "GetSceneItemList" | "GetGroupSceneItemList" => {
+            if let Some(idx) = state.resolve_scene(data) {
+                let items: Vec<Value> = state.scenes[idx]
+                    .items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        json!({
+                            "sceneItemId": item.id,
+                            "sceneItemIndex": i,
+                            "sourceName": item.source_name,
+                            "sourceUuid": item.source_uuid,
+                            "sourceType": "OBS_SOURCE_TYPE_INPUT",
+                            "inputKind": item.source_kind,
+                            "isGroup": false,
+                            "sceneItemEnabled": item.enabled,
+                            "sceneItemLocked": item.locked,
+                            "sceneItemBlendMode": item.blend_mode,
+                            "sceneItemTransform": transform_json(&item.transform)
+                        })
+                    })
+                    .collect();
+                success(request_type, request_id, json!({ "sceneItems": items }))
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
         }
 
-        "DuplicateSceneItem" => success(request_type, request_id, json!({ "sceneItemId": 2 })),
-
-        "GetSceneItemTransform" => success(request_type, request_id, json!({
-            "sceneItemTransform": {
-                "positionX": 0.0,
-                "positionY": 0.0,
-                "rotation": 0.0,
-                "scaleX": 1.0,
-                "scaleY": 1.0,
-                "width": 1920.0,
-                "height": 1080.0,
-                "alignment": 5,
-                "boundsType": "OBS_BOUNDS_NONE",
-                "boundsAlignment": 0,
-                "boundsWidth": 0.0,
-                "boundsHeight": 0.0,
-                "cropLeft": 0,
-                "cropRight": 0,
-                "cropTop": 0,
-                "cropBottom": 0,
-                "sourceWidth": 1920.0,
-                "sourceHeight": 1080.0
+        "GetSceneItemId" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let source_name = data.get("sourceName").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(item) = state.scenes[scene_idx].items.iter().find(|i| i.source_name == source_name) {
+                    success(request_type, request_id, json!({ "sceneItemId": item.id }))
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
             }
-        })),
+        }
 
-        "GetSceneItemEnabled" => success(request_type, request_id, json!({ "sceneItemEnabled": true })),
-        "GetSceneItemLocked" => success(request_type, request_id, json!({ "sceneItemLocked": false })),
-        "GetSceneItemIndex" => success(request_type, request_id, json!({ "sceneItemIndex": 0 })),
-        "GetSceneItemBlendMode" => success(request_type, request_id, json!({ "sceneItemBlendMode": "OBS_BLEND_NORMAL" })),
+        "GetSceneItemSource" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    let item = &state.scenes[scene_idx].items[item_idx];
+                    success(request_type, request_id, json!({
+                        "sourceName": item.source_name,
+                        "sourceUuid": item.source_uuid
+                    }))
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "CreateSceneItem" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let source_name = data.get("sourceName").and_then(|v| v.as_str()).unwrap_or("New Source").to_string();
+                let enabled = data.get("sceneItemEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                let id = state.next_scene_item_id();
+                state.scenes[scene_idx].items.push(SceneItem {
+                    id,
+                    source_name,
+                    source_uuid: Uuid::new_v4().to_string(),
+                    source_kind: "image_source".to_string(),
+                    enabled,
+                    locked: false,
+                    blend_mode: "OBS_BLEND_NORMAL".to_string(),
+                    transform: SceneItemTransform {
+                        position_x: 0.0, position_y: 0.0,
+                        rotation: 0.0, scale_x: 1.0, scale_y: 1.0,
+                        width: 1920.0, height: 1080.0,
+                        source_width: 1920.0, source_height: 1080.0,
+                    },
+                });
+                success(request_type, request_id, json!({ "sceneItemId": id }))
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "RemoveSceneItem" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    state.scenes[scene_idx].items.remove(item_idx);
+                    success_empty(request_type, request_id)
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "SetSceneItemTransform" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    if let Some(t) = data.get("sceneItemTransform") {
+                        let tr = &mut state.scenes[scene_idx].items[item_idx].transform;
+                        if let Some(v) = t.get("positionX").and_then(|v| v.as_f64()) { tr.position_x = v; }
+                        if let Some(v) = t.get("positionY").and_then(|v| v.as_f64()) { tr.position_y = v; }
+                        if let Some(v) = t.get("rotation").and_then(|v| v.as_f64()) { tr.rotation = v; }
+                        if let Some(v) = t.get("scaleX").and_then(|v| v.as_f64()) { tr.scale_x = v; }
+                        if let Some(v) = t.get("scaleY").and_then(|v| v.as_f64()) { tr.scale_y = v; }
+                    }
+                    success_empty(request_type, request_id)
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "SetSceneItemEnabled" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    if let Some(v) = data.get("sceneItemEnabled").and_then(|v| v.as_bool()) {
+                        state.scenes[scene_idx].items[item_idx].enabled = v;
+                    }
+                    success_empty(request_type, request_id)
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "SetSceneItemLocked" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    if let Some(v) = data.get("sceneItemLocked").and_then(|v| v.as_bool()) {
+                        state.scenes[scene_idx].items[item_idx].locked = v;
+                    }
+                    success_empty(request_type, request_id)
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "SetSceneItemIndex" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let new_index = data.get("sceneItemIndex").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    let item = state.scenes[scene_idx].items.remove(item_idx);
+                    let insert_at = new_index.min(state.scenes[scene_idx].items.len());
+                    state.scenes[scene_idx].items.insert(insert_at, item);
+                    success_empty(request_type, request_id)
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "SetSceneItemBlendMode" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    if let Some(v) = data.get("sceneItemBlendMode").and_then(|v| v.as_str()) {
+                        state.scenes[scene_idx].items[item_idx].blend_mode = v.to_string();
+                    }
+                    success_empty(request_type, request_id)
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "DuplicateSceneItem" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    let new_id = state.next_scene_item_id();
+                    let src = &state.scenes[scene_idx].items[item_idx];
+                    let new_item = SceneItem {
+                        id: new_id,
+                        source_name: src.source_name.clone(),
+                        source_uuid: Uuid::new_v4().to_string(),
+                        source_kind: src.source_kind.clone(),
+                        enabled: src.enabled,
+                        locked: false,
+                        blend_mode: src.blend_mode.clone(),
+                        transform: SceneItemTransform {
+                            position_x: src.transform.position_x,
+                            position_y: src.transform.position_y,
+                            rotation: src.transform.rotation,
+                            scale_x: src.transform.scale_x,
+                            scale_y: src.transform.scale_y,
+                            width: src.transform.width,
+                            height: src.transform.height,
+                            source_width: src.transform.source_width,
+                            source_height: src.transform.source_height,
+                        },
+                    };
+                    let dest_scene = data.get("destinationSceneName")
+                        .and_then(|v| v.as_str())
+                        .and_then(|n| state.find_scene_by_name(n))
+                        .unwrap_or(scene_idx);
+                    state.scenes[dest_scene].items.push(new_item);
+                    success(request_type, request_id, json!({ "sceneItemId": new_id }))
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "GetSceneItemTransform" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    let t = &state.scenes[scene_idx].items[item_idx].transform;
+                    success(request_type, request_id, json!({
+                        "sceneItemTransform": transform_json(t)
+                    }))
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "GetSceneItemEnabled" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    success(request_type, request_id, json!({
+                        "sceneItemEnabled": state.scenes[scene_idx].items[item_idx].enabled
+                    }))
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "GetSceneItemLocked" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    success(request_type, request_id, json!({
+                        "sceneItemLocked": state.scenes[scene_idx].items[item_idx].locked
+                    }))
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "GetSceneItemIndex" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    success(request_type, request_id, json!({ "sceneItemIndex": item_idx }))
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
+
+        "GetSceneItemBlendMode" => {
+            if let Some(scene_idx) = state.resolve_scene(data) {
+                let item_id = data.get("sceneItemId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(item_idx) = state.find_scene_item(scene_idx, item_id) {
+                    success(request_type, request_id, json!({
+                        "sceneItemBlendMode": state.scenes[scene_idx].items[item_idx].blend_mode
+                    }))
+                } else {
+                    not_found(request_type, request_id, "Scene item not found")
+                }
+            } else {
+                not_found(request_type, request_id, "Scene not found")
+            }
+        }
 
         // Transitions
         "GetTransitionKindList" => success(request_type, request_id, json!({
@@ -866,4 +1117,27 @@ fn not_found(request_type: &str, request_id: &str, comment: &str) -> RequestResp
         600,
         comment.to_string(),
     )
+}
+
+fn transform_json(t: &SceneItemTransform) -> Value {
+    json!({
+        "positionX": t.position_x,
+        "positionY": t.position_y,
+        "rotation": t.rotation,
+        "scaleX": t.scale_x,
+        "scaleY": t.scale_y,
+        "width": t.width,
+        "height": t.height,
+        "alignment": 5,
+        "boundsType": "OBS_BOUNDS_NONE",
+        "boundsAlignment": 0,
+        "boundsWidth": 0.0,
+        "boundsHeight": 0.0,
+        "cropLeft": 0,
+        "cropRight": 0,
+        "cropTop": 0,
+        "cropBottom": 0,
+        "sourceWidth": t.source_width,
+        "sourceHeight": t.source_height
+    })
 }
