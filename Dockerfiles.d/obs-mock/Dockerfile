@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.85-bookworm
+FROM rust:1.88-bookworm
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -12,7 +12,8 @@ ARG GID=1000
 RUN groupadd --force --gid ${GID} developer \
   && useradd --uid ${UID} --gid ${GID} --create-home --non-unique developer
 
-RUN cargo install cargo-watch
+RUN cargo install cargo-watch --locked \
+  && cargo install cargo-dist --locked
 
 USER developer
 
