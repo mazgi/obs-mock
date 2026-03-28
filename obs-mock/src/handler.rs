@@ -303,14 +303,20 @@ pub fn handle_request(
             ]
         })),
 
-        "GetSpecialInputs" => success(request_type, request_id, json!({
-            "desktop1": state.inputs.first().map(|i| i.name.as_str()).unwrap_or(""),
-            "desktop2": null,
-            "mic1": state.inputs.get(1).map(|i| i.name.as_str()),
-            "mic2": null,
-            "mic3": null,
-            "mic4": null
-        })),
+        "GetSpecialInputs" => {
+            let desktop1 = state.inputs.iter().find(|i| i.kind == "pulse_output_capture");
+            let desktop2 = state.inputs.iter().filter(|i| i.kind == "pulse_output_capture").nth(1);
+            let mic1 = state.inputs.iter().find(|i| i.kind == "pulse_input_capture");
+            let mic2 = state.inputs.iter().filter(|i| i.kind == "pulse_input_capture").nth(1);
+            success(request_type, request_id, json!({
+                "desktop1": desktop1.map(|i| i.name.as_str()),
+                "desktop2": desktop2.map(|i| i.name.as_str()),
+                "mic1": mic1.map(|i| i.name.as_str()),
+                "mic2": mic2.map(|i| i.name.as_str()),
+                "mic3": null,
+                "mic4": null
+            }))
+        }
 
         "CreateInput" => {
             let name = data.get("inputName").and_then(|v| v.as_str()).unwrap_or("New Input").to_string();
@@ -324,6 +330,10 @@ pub fn handle_request(
                 muted: false,
                 volume_mul: 1.0,
                 volume_db: 0.0,
+                balance: 0.5,
+                sync_offset: 0,
+                monitor_type: "OBS_MONITORING_TYPE_NONE".to_string(),
+                audio_tracks: [true, false, false, false, false, false],
                 settings,
             });
             success(request_type, request_id, json!({
@@ -451,17 +461,18 @@ pub fn handle_request(
         }
 
         "GetInputAudioBalance" => {
-            if state.resolve_input(data).is_some() {
-                success(request_type, request_id, json!({ "inputAudioBalance": 0.5 }))
+            if let Some(idx) = state.resolve_input(data) {
+                success(request_type, request_id, json!({ "inputAudioBalance": state.inputs[idx].balance }))
             } else {
                 not_found(request_type, request_id, "Input not found")
             }
         }
 
-        "SetInputAudioBalance" | "SetInputAudioSyncOffset" | "SetInputAudioMonitorType"
-        | "SetInputAudioTracks" | "SetInputDeinterlaceMode" | "SetInputDeinterlaceFieldOrder"
-        | "PressInputPropertiesButton" => {
-            if state.resolve_input(data).is_some() {
+        "SetInputAudioBalance" => {
+            if let Some(idx) = state.resolve_input(data) {
+                if let Some(v) = data.get("inputAudioBalance").and_then(|v| v.as_f64()) {
+                    state.inputs[idx].balance = v.clamp(0.0, 1.0);
+                }
                 success_empty(request_type, request_id)
             } else {
                 not_found(request_type, request_id, "Input not found")
@@ -469,26 +480,78 @@ pub fn handle_request(
         }
 
         "GetInputAudioSyncOffset" => {
-            if state.resolve_input(data).is_some() {
-                success(request_type, request_id, json!({ "inputAudioSyncOffset": 0 }))
+            if let Some(idx) = state.resolve_input(data) {
+                success(request_type, request_id, json!({ "inputAudioSyncOffset": state.inputs[idx].sync_offset }))
+            } else {
+                not_found(request_type, request_id, "Input not found")
+            }
+        }
+
+        "SetInputAudioSyncOffset" => {
+            if let Some(idx) = state.resolve_input(data) {
+                if let Some(v) = data.get("inputAudioSyncOffset").and_then(|v| v.as_i64()) {
+                    state.inputs[idx].sync_offset = v;
+                }
+                success_empty(request_type, request_id)
             } else {
                 not_found(request_type, request_id, "Input not found")
             }
         }
 
         "GetInputAudioMonitorType" => {
-            if state.resolve_input(data).is_some() {
-                success(request_type, request_id, json!({ "monitorType": "OBS_MONITORING_TYPE_NONE" }))
+            if let Some(idx) = state.resolve_input(data) {
+                success(request_type, request_id, json!({ "monitorType": state.inputs[idx].monitor_type }))
+            } else {
+                not_found(request_type, request_id, "Input not found")
+            }
+        }
+
+        "SetInputAudioMonitorType" => {
+            if let Some(idx) = state.resolve_input(data) {
+                if let Some(v) = data.get("monitorType").and_then(|v| v.as_str()) {
+                    state.inputs[idx].monitor_type = v.to_string();
+                }
+                success_empty(request_type, request_id)
             } else {
                 not_found(request_type, request_id, "Input not found")
             }
         }
 
         "GetInputAudioTracks" => {
-            if state.resolve_input(data).is_some() {
+            if let Some(idx) = state.resolve_input(data) {
+                let tracks = &state.inputs[idx].audio_tracks;
                 success(request_type, request_id, json!({
-                    "inputAudioTracks": { "1": true, "2": false, "3": false, "4": false, "5": false, "6": false }
+                    "inputAudioTracks": {
+                        "1": tracks[0], "2": tracks[1], "3": tracks[2],
+                        "4": tracks[3], "5": tracks[4], "6": tracks[5]
+                    }
                 }))
+            } else {
+                not_found(request_type, request_id, "Input not found")
+            }
+        }
+
+        "SetInputAudioTracks" => {
+            if let Some(idx) = state.resolve_input(data) {
+                if let Some(obj) = data.get("inputAudioTracks").and_then(|v| v.as_object()) {
+                    for (k, v) in obj {
+                        if let (Ok(i), Some(b)) = (k.parse::<usize>(), v.as_bool()) {
+                            if i >= 1 && i <= 6 {
+                                state.inputs[idx].audio_tracks[i - 1] = b;
+                            }
+                        }
+                    }
+                }
+                success_empty(request_type, request_id)
+            } else {
+                not_found(request_type, request_id, "Input not found")
+            }
+        }
+
+        "SetInputDeinterlaceMode" | "SetInputDeinterlaceFieldOrder"
+        | "PressInputPropertiesButton" => {
+            if state.resolve_input(data).is_some() {
+                success_empty(request_type, request_id)
             } else {
                 not_found(request_type, request_id, "Input not found")
             }

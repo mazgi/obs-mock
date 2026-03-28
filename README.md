@@ -43,6 +43,21 @@ The mock server starts with 5 pre-configured scenes:
 
 Scenes and their items are fully stateful — you can create, remove, rename, and reorder them via the WebSocket API.
 
+### Audio mixers
+
+The mock server includes 6 pre-configured audio mixer inputs:
+
+| Input | Kind | Volume | Monitor Type | Tracks |
+|---|---|---|---|---|
+| **Desktop Audio** | pulse_output_capture | 0 dB | None | 1 |
+| **Desktop Audio 2** | pulse_output_capture | 0 dB (muted) | None | 2 |
+| **Mic/Aux** | pulse_input_capture | -1.94 dB | Monitor & Output | 1 |
+| **Mic/Aux 2** | pulse_input_capture | 0 dB (muted) | None | 2 |
+| **Browser Audio** | browser_source | -6.02 dB | Monitor Only | 1, 3 |
+| **Media Source** | ffmpeg_source | -3.10 dB | None | 1, 4 |
+
+All audio mixer properties (volume, mute, balance, sync offset, monitor type, audio tracks) are stateful and can be read and written via the WebSocket API.
+
 ### Supported features
 
 - Full obs-websocket 5.x handshake (Hello/Identify/Identified) with optional SHA256 authentication
@@ -50,7 +65,7 @@ Scenes and their items are fully stateful — you can create, remove, rename, an
 - All 114 request types from the protocol, including:
   - Scenes: list, create, remove, rename, switch program/preview
   - Scene Items: list, create, remove, duplicate, transform, enable/disable, lock, reorder
-  - Inputs: list, create, remove, mute, volume, settings
+  - Inputs/Audio Mixers: list, create, remove, mute, volume, balance, sync offset, monitor type, audio tracks, settings
   - Streaming: start, stop, toggle, status
   - Recording: start, stop, pause, resume, status
   - Outputs: virtual cam, replay buffer
